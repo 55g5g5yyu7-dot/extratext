@@ -1,0 +1,28 @@
+{
+    "name": "modx-extra/extratextareas",
+    "description": "Adds extra textarea fields to MODX resources.",
+    "type": "modx-extra",
+    "keywords": ["modx", "component", "textarea"],
+    "homepage": "https://github.com/yourusername/extratextareas",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Benjamin Vauchel",
+            "email": "contact@omycode.fr",
+            "role": "Developer"
+        }
+    ],
+    "support": {
+        "email": "contact@omycode.fr",
+        "issues": "https://github.com/yourusername/extratextareas/issues"
+    },
+    "require": {
+        "php": ">=8.0",
+        "modx/composer-installer": "^1.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "ExtraTextAreas\\": "src/"
+        }
+    }
+}
