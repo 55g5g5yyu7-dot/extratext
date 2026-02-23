@@ -1,0 +1,160 @@
+<?php
+/**
+ * ExtraTextAreas
+ * Copyright 2013-2023 by Benjamin Vauchel <contact@omycode.fr>
+ *
+ * This file is part of ExtraTextAreas, a MODX Extra.
+ *
+ * @copyright   Copyright (C) 2013-2023 Benjamin Vauchel
+ * @author      Benjamin Vauchel <contact@omycode.fr>
+ * @license     GNU General Public License, version 2 (GPL-2.0)
+ */
+
+class ExtraTextAreasFieldCreateProcessor extends modObjectCreateProcessor
+{
+    public $classKey = 'ExtraTextAreasField';
+    public $languageTopics = array('extratextareas:default');
+    public $objectType = 'extratextareas.field';
+
+    /**
+     * Override the modObjectCreateProcessor::beforeSet method to add custom validation
+     * @return boolean
+     */
+    public function beforeSet()
+    {
+        $name = $this->getProperty('name');
+        if (empty($name)) {
+            $this->addFieldError('name', $this->modx->lexicon('extratextareas.field_err_ns_name'));
+        } else {
+            // Check for duplicate names
+            $alreadyExists = $this->modx->getObject('ExtraTextAreasField', array('name' => $name));
+            if ($alreadyExists) {
+                $this->addFieldError('name', $this->modx->lexicon('extratextareas.field_err_ae', array('name' => $name)));
+            }
+        }
+
+        return parent::beforeSet();
+    }
+
+    /**
+     * Override the modObjectProcessor::afterSave method to add custom behavior
+     * @return boolean
+     */
+    public function afterSave()
+    {
+        // Add custom behavior after saving the field
+        return true;
+    }
+
+    /**
+     * Handle errors during creation with detailed information
+     * @return array|string
+     */
+    public function process()
+    {
+        try {
+            // First, check if we can instantiate the model class
+            $className = $this->classKey;
+            if (!class_exists($className)) {
+                $errorMessage = $this->modx->lexicon('extratextareas.field_err_save') . 
+                               ' Model class does not exist: ' . $className;
+                
+                $this->modx->log(modX::LOG_LEVEL_ERROR, 
+                    'Model class not found in ExtraTextAreasFieldCreateProcessor: ' . $className, 
+                    '', 
+                    'ExtraTextAreasFieldCreateProcessor::process'
+                );
+                
+                return $this->failure($errorMessage);
+            }
+
+            $object = $this->object;
+            $beforeSetResult = $this->beforeSet();
+            
+            if ($beforeSetResult !== true) {
+                return $this->failure($this->modx->lexicon('extratextareas.field_err_save'));
+            }
+
+            // Prepare object properties
+            $this->prepareBeforeSave();
+            
+            // Validate the object before saving
+            if (!$this->beforeSave()) {
+                return $this->failure($this->modx->lexicon('extratextareas.field_err_save'));
+            }
+
+            // Attempt to save the object
+            $saved = $object->save();
+
+            if (!$saved) {
+                // Detailed error reporting
+                $errorInfo = $object->_validator->getErrors();
+                
+                // Log detailed error information
+                $this->modx->log(modX::LOG_LEVEL_ERROR, 
+                    'Failed to save ExtraTextAreasField: ' . 
+                    print_r($errorInfo, true) . ' | Object data: ' . 
+                    print_r($object->toArray(), true), 
+                    '', 
+                    'ExtraTextAreasFieldCreateProcessor::process'
+                );
+                
+                // Prepare error message with details
+                $errorMessage = $this->modx->lexicon('extratextareas.field_err_save');
+                
+                if (!empty($errorInfo)) {
+                    $errorMessage .= ' Validation errors: ' . implode(', ', $errorInfo);
+                } else {
+                    $errorMessage .= ' No validation errors reported; check MODX error log.';
+                }
+                
+                return $this->failure($errorMessage);
+            }
+
+            // Run after save logic
+            $afterSaveResult = $this->afterSave();
+            
+            if ($afterSaveResult !== true) {
+                return $this->failure($this->modx->lexicon('extratextareas.field_err_save'));
+            }
+
+            // Prepare success response
+            $responseObject = $this->prepareResponse();
+            
+            return $responseObject;
+        } catch (PDOException $e) {
+            // Handle PDO exceptions with specific details
+            $errorMessage = $this->modx->lexicon('extratextareas.field_err_save') . 
+                           ' SQL Error (' . $e->getCode() . '): ' . $e->getMessage();
+            
+            $this->modx->log(modX::LOG_LEVEL_ERROR, 
+                'PDOException in ExtraTextAreasFieldCreateProcessor: ' . 
+                $e->getMessage() . ' | Code: ' . $e->getCode() . 
+                ' | SQLSTATE: ' . $e->getCode() . 
+                ' | Trace: ' . $e->getTraceAsString(), 
+                '', 
+                'ExtraTextAreasFieldCreateProcessor::process'
+            );
+            
+            return $this->failure($errorMessage);
+        } catch (Exception $e) {
+            // Handle general exceptions
+            $errorMessage = $this->modx->lexicon('extratextareas.field_err_save') . 
+                           ' Exception: ' . $e->getMessage();
+            
+            $this->modx->log(modX::LOG_LEVEL_ERROR, 
+                'Exception in ExtraTextAreasFieldCreateProcessor: ' . 
+                $e->getMessage() . 
+                ' | File: ' . $e->getFile() . 
+                ' | Line: ' . $e->getLine() . 
+                ' | Trace: ' . $e->getTraceAsString(), 
+                '', 
+                'ExtraTextAreasFieldCreateProcessor::process'
+            );
+            
+            return $this->failure($errorMessage);
+        }
+    }
+}
+
+return 'ExtraTextAreasFieldCreateProcessor';

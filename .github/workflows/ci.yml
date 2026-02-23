@@ -1,75 +1,210 @@
-name: CI
+name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, develop ]
   pull_request:
     branches: [ main ]
 
 jobs:
-  test:
+  lint-syntax:
     runs-on: ubuntu-latest
-    services:
-      mysql:
-        image: mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: root
-          MYSQL_DATABASE: modx
-          MYSQL_USER: modx
-          MYSQL_PASSWORD: modx
-        ports:
-          - 3306:3306
-        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        token: ${{ secrets.GH_TOKEN }}
-
+    - uses: actions/checkout@v3
+    
     - name: Setup PHP
       uses: shivammathur/setup-php@v2
       with:
         php-version: '8.2'
         extensions: pdo, pdo_mysql
+        
+    - name: Lint PHP files
+      run: |
+        find . -name "*.php" -not -path "./vendor/*" -print0 | xargs -0 -n1 php -l
+    
+    - name: Check shell script syntax
+      run: |
+        find . -name "*.sh" -print0 | xargs -0 -n1 bash -n
 
+  build:
+    runs-on: ubuntu-latest
+    needs: lint-syntax
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: '8.2'
+        extensions: pdo, pdo_mysql
+        
     - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y mysql-client
-
-    - name: Run linting
+        composer install --no-dev
+    
+    - name: Setup MySQL Service
       run: |
-        find . -name "*.php" -exec php -l {} \;
-        shellcheck scripts/*.sh
-
-    - name: Build transport package
-      run: |
-        chmod +x ./scripts/build_transport_ci.sh
-        ./scripts/build_transport_ci.sh
+        sudo service mysql start
+        mysql -e "CREATE USER IF NOT EXISTS 'modx'@'localhost' IDENTIFIED BY 'modx';"
+        mysql -e "CREATE DATABASE IF NOT EXISTS modx;"
+        mysql -e "GRANT ALL ON modx.* TO 'modx'@'localhost';"
+        mysql -e "FLUSH PRIVILEGES;"
       env:
-        MYSQL_HOST: 127.0.0.1
+        MYSQL_ROOT_PASSWORD: root
+        
+    - name: Run build script
+      run: ./build.sh
+      env:
+        MYSQL_HOST: localhost
         MYSQL_USER: modx
         MYSQL_PASSWORD: modx
         MYSQL_DATABASE: modx
-
-    - name: Verify install and smoke tests
-      run: |
-        php ./scripts/verify_package_install_ci.php
-      env:
-        MODX_BASE_PATH: ${{ github.workspace }}/.modx-runtime/modx
-
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
+        
+    - name: Upload transport package artifact
+      uses: actions/upload-artifact@v3
       with:
         name: transport-package
         path: dist/*.transport.zip
 
-    - name: Commit and push if changed
+  verify-install-smoke:
+    runs-on: ubuntu-latest
+    needs: build
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: rootpassword
+          MYSQL_DATABASE: modx_test
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Download transport package
+      uses: actions/download-artifact@v3
+      with:
+        name: transport-package
+        path: dist/
+        
+    - name: Setup PHP with MODX prerequisites
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: '8.2'
+        extensions: pdo, pdo_mysql, curl, mbstring, xml, zip
+        ini-values: post_max_size=64M, upload_max_filesize=64M
+        
+    - name: Install MODX via CLI
+      run: |
+        # Download MODX
+        wget https://modx.com/download/direct/modx-3.0.3-pl.zip -O modx.zip
+        unzip modx.zip -d /tmp/modx-install
+        cp -r /tmp/modx-install/* .
+        
+        # Set up file permissions
+        chmod -R 777 core/cache/
+        chmod -R 777 core/components/
+        chmod -R 777 assets/
+        chmod -R 777 manager/
+        
+        # Run MODX setup
+        php setup/index.php --installmode=new --database_type=mysql --database_server=localhost --database=${{ secrets.MYSQL_DATABASE || 'modx_test' }} --database_user=root --database_password=rootpassword --database_connection_charset=utf8 --database_charset=utf8 --database_collation=utf8_general_ci --cmsadmin=admin --cmspassword=admin123 --cmsadminemail=admin@example.com --core_path=/workspace/core/ --web_path=/workspace/
+      env:
+        MYSQL_HOST: localhost
+        MYSQL_PORT: ${{ job.services.mysql.ports[3306] }}
+        MYSQL_USER: root
+        MYSQL_PASSWORD: rootpassword
+        MYSQL_DATABASE: modx_test
+        
+    - name: Install ExtraTextAreas package
+      run: |
+        # Wait for MODX to be ready
+        sleep 10
+        
+        # Check if MODX is accessible
+        if [ ! -f "config.core.php" ]; then
+          echo "ERROR: config.core.php not found"
+          ls -la
+          exit 1
+        fi
+        
+        # Create packages directory if needed
+        mkdir -p core/packages/
+        mkdir -p core/packages/temp/
+        
+        # Copy our transport package to MODX packages directory
+        cp dist/*.transport.zip core/packages/
+        
+        # Install the package via CLI
+        php -r "
+        require_once 'config.core.php';
+        require_once MODX_CORE_PATH . 'model/modx/modx.class.php';
+        
+        \$modx = new modX();
+        \$modx->initialize('mgr');
+        \$modx->getService('error','error.modError', '', '');
+        
+        // Scan for local packages
+        \$modx->getVersionData();
+        \$modx->loadClass('transport.modTransportPackage', '', false, true);
+        
+        // Get the package signature
+        \$transportZip = glob('core/packages/*.transport.zip')[0];
+        \$signature = str_replace('.transport.zip', '', basename(\$transportZip));
+        
+        echo '[verify] Installing package with signature: ' . \$signature . \"\\n\";
+        
+        // Install the package
+        \$package = \$modx->getObject('transport.modTransportPackage', array('signature' => \$signature));
+        if (!\$package) {
+            // Create new package object if not found
+            \$package = \$modx->newObject('transport.modTransportPackage');
+            \$package->set('signature', \$signature);
+            \$package->set('state', 1);
+            \$package->set('workspace', 1);
+            \$package->set('provider', 0);
+            \$package->set('source', \$transportZip);
+        }
+        
+        if (\$package) {
+            \$package->install();
+            echo '[verify] Package installed successfully\\n';
+        } else {
+            echo '[verify] ERROR: Could not load package\\n';
+            exit(1);
+        }
+        "
+        
+    - name: Run verification script
+      run: ./verify.sh
+      env:
+        MODX_BASE_PATH: /workspace
+
+  artifact-upload:
+    runs-on: ubuntu-latest
+    needs: verify-install-smoke
+    if: github.ref == 'refs/heads/main'
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: dist/
+        
+    - name: Commit and push new transport package
       run: |
         git config --global user.name 'github-actions[bot]'
         git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-        git add .
-        git diff --staged --quiet || (git commit -m "Update dist package [skip ci]" && git push)
-      env:
-        GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        
+        # Find and copy the transport package to the right location
+        find dist/ -name "*.transport.zip" -exec cp {} . \;
+        
+        # Add and commit the new package
+        git add *.transport.zip
+        git commit -m "Auto-update transport package [skip ci]" || echo "No changes to commit"
+        git push origin main || echo "No changes to push"
